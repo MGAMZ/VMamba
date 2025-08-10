@@ -361,7 +361,7 @@ else:
     selective_scan_cuda = None
 
 
-print("use MODE:", MODE)
+print("selective_scan MODE:", MODE)
 DSTATE = [1]
 DIM = [768]
 DIM1 = [768]

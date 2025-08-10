@@ -1,0 +1,52 @@
+[build-system]
+requires = [
+  "setuptools>=61",
+  "wheel",
+  "packaging",
+  "ninja",
+  "einops"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "selective_scan"
+version = "0.0.2"
+description = "Selective scan CUDA kernels (oflex/core/mamba unified API)"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.7"
+license = { text = "BSD-3-Clause" }
+authors = [
+  { name = "Tri Dao", email = "tri@tridao.me" },
+  { name = "Albert Gu", email = "agu@cs.cmu.edu" },
+  { name = "Anonymous" }
+]
+keywords = ["mamba", "state-space", "selective-scan", "cuda", "deep-learning"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: Unix",
+]
+dependencies = [
+  "torch",
+  "packaging",
+  "ninja",
+  "einops",
+]
+
+[project.urls]
+Homepage = "https://github.com/state-spaces/mamba"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["selective_scan"]
+
+[tool.setuptools.package-dir]
+selective_scan = "."
+
+[tool.setuptools.package-data]
+selective_scan = [
+  "csrc/selective_scan/**/*.h",
+  "csrc/selective_scan/**/*.cuh",
+  "csrc/selective_scan/**/*.cpp",
+  "csrc/selective_scan/**/*.cu"
+]

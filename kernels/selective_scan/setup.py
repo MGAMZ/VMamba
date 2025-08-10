@@ -1,18 +1,12 @@
 # Modified by $@#Anonymous#@$ #20240123
 # Copyright (c) 2023, Albert Gu, Tri Dao.
-import sys
 import warnings
 import os
-import re
-import ast
 from pathlib import Path
 from packaging.version import parse, Version
-import platform
-import shutil
-
-from setuptools import setup, find_packages
 import subprocess
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+from setuptools import setup
 
 import torch
 from torch.utils.cpp_extension import (
@@ -42,9 +36,11 @@ def get_cuda_bare_metal_version(cuda_dir):
 
     return raw_output, bare_metal_version
 
-MODES = ["oflex"]
-# MODES = ["core", "ndstate", "oflex"]
-# MODES = ["core", "ndstate", "oflex", "nrow"]
+_env_modes = os.getenv("SELECTIVE_SCAN_MODES", None)
+if _env_modes:
+    MODES = [m.strip() for m in _env_modes.split(',') if m.strip()]
+else:
+    MODES = ["core", "oflex"]  # safe subset present in this repository snapshot
 
 def get_ext():
     cc_flag = []
@@ -112,59 +108,54 @@ def get_ext():
         oflex="selective_scan_cuda_oflex",
     )
 
-    ext_modules = [
-        CUDAExtension(
-            name=names.get(MODE, None),
-            sources=sources.get(MODE, None),
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-                "nvcc": [
-                            "-O3",
-                            "-std=c++17",
-                            "-U__CUDA_NO_HALF_OPERATORS__",
-                            "-U__CUDA_NO_HALF_CONVERSIONS__",
-                            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-                            "--expt-relaxed-constexpr",
-                            "--expt-extended-lambda",
-                            "--use_fast_math",
-                            "--ptxas-options=-v",
-                            "-lineinfo",
-                        ]
-                        + cc_flag
-            },
-            include_dirs=[Path(this_dir) / "csrc" / "selective_scan"],
+    # Filter MODES to only those whose listed source files actually exist.
+    valid_modes = []
+    for MODE in MODES:
+        src_list = sources.get(MODE, [])
+        missing = [p for p in src_list if not os.path.exists(os.path.join(this_dir, p))]
+        if missing:
+            warnings.warn(f"Skip MODE '{MODE}' (missing sources: {missing[:2]}{'...' if len(missing)>2 else ''})")
+            continue
+        valid_modes.append(MODE)
+    if not valid_modes:
+        warnings.warn("No valid selective_scan MODES found; no CUDA extensions will be built.")
+        return []
+
+    ext_modules = []
+    for MODE in valid_modes:
+        ext_modules.append(
+            CUDAExtension(
+                name=names.get(MODE, None),
+                sources=sources.get(MODE, None),
+                extra_compile_args={
+                    "cxx": ["-O3", "-std=c++17"],
+                    "nvcc": [
+                                "-O3",
+                                "-std=c++17",
+                                "-U__CUDA_NO_HALF_OPERATORS__",
+                                "-U__CUDA_NO_HALF_CONVERSIONS__",
+                                "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                                "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                                "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+                                "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+                                "--expt-relaxed-constexpr",
+                                "--expt-extended-lambda",
+                                "--use_fast_math",
+                                "--ptxas-options=-v",
+                                "-lineinfo",
+                            ]
+                            + cc_flag
+                },
+                include_dirs=[Path(this_dir) / "csrc" / "selective_scan"],
+            )
         )
-        for MODE in MODES
-    ]
 
     return ext_modules
 
 ext_modules = get_ext()
+
+# Minimal shim: metadata is now in pyproject.toml; keep build_ext so editable/dev installs still compile CUDA.
 setup(
-    name="selective_scan",
-    version="0.0.2",
-    packages=[],
-    author="Tri Dao, Albert Gu, $@#Anonymous#@$ ",
-    author_email="tri@tridao.me, agu@cs.cmu.edu, $@#Anonymous#EMAIL@$",
-    description="selective scan",
-    long_description="",
-    long_description_content_type="text/markdown",
-    url="https://github.com/state-spaces/mamba",
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: BSD License",
-        "Operating System :: Unix",
-    ],
     ext_modules=ext_modules,
     cmdclass={"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension} if ext_modules else {"bdist_wheel": _bdist_wheel,},
-    python_requires=">=3.7",
-    install_requires=[
-        "torch",
-        "packaging",
-        "ninja",
-        "einops",
-    ],
 )

@@ -77,7 +77,21 @@ def get_ext_modules():  # pragma: no cover - build helper
     print("[vmamba] Prepared selective_scan_cuda_oflex extension (sources count=", len(sources), ")", flush=True)
     return [ext]
 
-if __name__ == "__main__":  # pragma: no cover
-    setup(ext_modules=get_ext_modules())
-else:
-    setup(ext_modules=get_ext_modules())
+# We must provide torch's custom BuildExtension so setuptools knows how to
+# handle CUDA (.cu) sources. Without it, you'll see: "unknown file type '.cu'".
+try:  # pragma: no cover - build helper
+    from torch.utils.cpp_extension import BuildExtension  # type: ignore
+    _cmdclass = {"build_ext": BuildExtension}
+except Exception:  # noqa: BLE001
+    # If torch isn't importable at setup time (e.g. building sdist metadata),
+    # just omit cmdclass; extension build (if any) will be skipped inside
+    # get_ext_modules() anyway and users can reinstall after torch is present.
+    _cmdclass = {}
+
+setup(
+    name="vmamba",
+    version='0.1.0',
+    ext_modules=get_ext_modules(),
+    cmdclass=_cmdclass,
+    py_modules=['vmamba']
+)

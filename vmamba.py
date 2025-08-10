@@ -781,10 +781,25 @@ import torch
 import warnings
 
 
+# Backend availability flags (mamba original file only handled mamba; add oflex/core for parity with classification version)
+WITH_SELECTIVESCAN_OFLEX = True
+WITH_SELECTIVESCAN_CORE = True
 WITH_SELECTIVESCAN_MAMBA = True
-try:
-    import selective_scan_cuda
+try:  # oflex (optimized flexible version)
+    import selective_scan_cuda_oflex  # type: ignore
 except ImportError:
+    selective_scan_cuda_oflex = None  # type: ignore
+    WITH_SELECTIVESCAN_OFLEX = False
+    warnings.warn("Can not import selective_scan_cuda_oflex. This affects speed.")
+try:  # core backend
+    import selective_scan_cuda_core  # type: ignore
+except ImportError:
+    selective_scan_cuda_core = None  # type: ignore
+    WITH_SELECTIVESCAN_CORE = False
+try:  # mamba backend
+    import selective_scan_cuda  # type: ignore
+except ImportError:
+    selective_scan_cuda = None  # type: ignore
     WITH_SELECTIVESCAN_MAMBA = False
 
 
@@ -836,22 +851,43 @@ def selective_scan_torch(
 
 class SelectiveScanCuda(torch.autograd.Function):
     @staticmethod
-    @torch.cuda.amp.custom_fwd
+    @torch.amp.custom_fwd(device_type='cuda')
     def forward(ctx, u, delta, A, B, C, D=None, delta_bias=None, delta_softplus=False, oflex=True, backend=None):
+        """CUDA forward with multiple backend fallbacks. Ensures x is always defined."""
         ctx.delta_softplus = delta_softplus
-        # backend = "oflex" if WITH_SELECTIVESCAN_OFLEX and (backend is None) else backend
-        # backend = "core" if WITH_SELECTIVESCAN_CORE and (backend is None) else backend
-        backend = "mamba" if WITH_SELECTIVESCAN_MAMBA and (backend is None) else backend
+        # Resolve backend preference if None: prioritize mamba > oflex > core
+        if backend is None:
+            if WITH_SELECTIVESCAN_MAMBA:
+                backend = "mamba"
+            elif WITH_SELECTIVESCAN_OFLEX:
+                backend = "oflex"
+            elif WITH_SELECTIVESCAN_CORE:
+                backend = "core"
+            else:
+                raise RuntimeError("No selective scan CUDA backend available. Reinstall/build extensions or set backend='torch'.")
+        # Validate requested backend availability; if unavailable suggest alternatives.
+        if backend == "oflex" and not WITH_SELECTIVESCAN_OFLEX:
+            raise RuntimeError("Requested backend 'oflex' not available. Build selective_scan_cuda_oflex or choose backend='mamba' or 'torch'.")
+        if backend == "core" and not WITH_SELECTIVESCAN_CORE:
+            raise RuntimeError("Requested backend 'core' not available. Build selective_scan_cuda_core or choose backend='mamba' or 'torch'.")
+        if backend == "mamba" and not WITH_SELECTIVESCAN_MAMBA:
+            raise RuntimeError("Requested backend 'mamba' not available. Build selective_scan_cuda or choose backend='torch'.")
         ctx.backend = backend
+
         if backend == "oflex":
             out, x, *rest = selective_scan_cuda_oflex.fwd(u, delta, A, B, C, D, delta_bias, delta_softplus, 1, oflex)
+        elif backend == "core":
+            out, x, *rest = selective_scan_cuda_core.fwd(u, delta, A, B, C, D, delta_bias, delta_softplus, 1)
         elif backend == "mamba":
             out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, None, delta_bias, delta_softplus)
+        else:  # Should not reach here due to checks above
+            raise RuntimeError(f"Unsupported selective scan backend: {backend}")
+
         ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
         return out
-    
+
     @staticmethod
-    @torch.cuda.amp.custom_bwd
+    @torch.amp.custom_bwd(device_type='cuda')
     def backward(ctx, dout, *args):
         u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
         backend = ctx.backend
@@ -861,11 +897,17 @@ class SelectiveScanCuda(torch.autograd.Function):
             du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda_oflex.bwd(
                 u, delta, A, B, C, D, delta_bias, dout, x, ctx.delta_softplus, 1
             )
+        elif backend == "core":
+            du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda_core.bwd(
+                u, delta, A, B, C, D, delta_bias, dout, x, ctx.delta_softplus, 1
+            )
         elif backend == "mamba":
             du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
                 u, delta, A, B, C, D, None, delta_bias, dout, x, None, None, ctx.delta_softplus,
                 False
             )
+        else:
+            raise RuntimeError(f"Unsupported selective scan backend in backward: {backend}")
         return du, ddelta, dA, dB, dC, dD, ddelta_bias, None, None, None
 
 
@@ -881,7 +923,23 @@ def selective_scan_fn(
     oflex=True,
     backend=None,
 ):
-    fn = selective_scan_torch if backend == "torch" or (not WITH_SELECTIVESCAN_MAMBA) else SelectiveScanCuda.apply
+    # Decide whether to use CUDA autograd function or pure torch fallback.
+    # Conditions for torch fallback:
+    # 1. Explicit backend == 'torch'
+    # 2. Requested backend extension not built / unavailable
+    # 3. No CUDA backends at all
+    backend_unavailable = (
+        (backend == "core" and not WITH_SELECTIVESCAN_CORE) or
+        (backend == "oflex" and not WITH_SELECTIVESCAN_OFLEX) or
+        (backend == "mamba" and not WITH_SELECTIVESCAN_MAMBA)
+    )
+    if backend == "torch" or backend_unavailable or (not (WITH_SELECTIVESCAN_MAMBA or WITH_SELECTIVESCAN_OFLEX or WITH_SELECTIVESCAN_CORE)):
+        # Optional warning (only when user asked for a specific unavailable backend)
+        if backend is not None and backend != "torch" and backend_unavailable:
+            warnings.warn(f"selective_scan backend '{backend}' not available; falling back to pure torch implementation.")
+        fn = selective_scan_torch
+    else:
+        fn = SelectiveScanCuda.apply
     return fn(u, delta, A, B, C, D, delta_bias, delta_softplus, oflex, backend)
 
 
@@ -1516,7 +1574,20 @@ class SS2Dv2:
         # ==============================
         **kwargs,
     ):
-        assert selective_scan_backend in [None, "oflex", "mamba", "torch"]
+        # Graceful fallback if a requested CUDA backend (currently 'core') isn't actually built.
+        # This prevents a hard RuntimeError higher in the call stack and mirrors a user-friendly
+        # behavior: transparently downgrade to an available faster backend, else to torch.
+        if selective_scan_backend == "core" and not WITH_SELECTIVESCAN_CORE:
+            warnings.warn(
+                "selective_scan_backend='core' requested but selective_scan_cuda_core not built; "
+                "falling back to 'oflex' > 'mamba' > 'torch'. To build core, edit kernels/selective_scan/setup.py MODES to include 'core' and reinstall.")
+            if WITH_SELECTIVESCAN_OFLEX:
+                selective_scan_backend = "oflex"
+            elif WITH_SELECTIVESCAN_MAMBA:
+                selective_scan_backend = "mamba"
+            else:
+                selective_scan_backend = "torch"
+        assert selective_scan_backend in [None, "oflex", "mamba", "torch", "core"]
         _scan_mode = dict(cross2d=0, unidi=1, bidi=2, cascade2d=-1).get(scan_mode, None) if isinstance(scan_mode, str) else scan_mode # for debug
         assert isinstance(_scan_mode, int)
         delta_softplus = True
@@ -2477,7 +2548,7 @@ if __name__ == "__main__":
     do_throughput("vmamba_tiny_s1l8")
     # do_throughput("vmamba_small_s1l20")
     # do_throughput("vmamba_base_s1l20")
-    
+
 
 
 
